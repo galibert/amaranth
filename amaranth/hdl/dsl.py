@@ -38,6 +38,16 @@ class _ModuleBuilderDomain(_ModuleBuilderProxy):
         self._builder._add_statement(assigns, domain=self._domain, depth=self._depth)
         return self
 
+    def __getattr__(self, name):
+        if name == "name":
+            return self._domain
+        if name == "clk":
+            return ClockSignal(self._domain)
+        if name == "rst":
+            return ResetSignal(self._domain)
+        raise AttributeError("'{}' object has no attribute '{}'"
+                             .format(type(self).__name__, name))
+
 
 class _ModuleBuilderDomains(_ModuleBuilderProxy):
     def __getattr__(self, name):
