@@ -1,3 +1,8 @@
+.. testsetup::
+
+   # Required to capture warnings in doctests.
+   import sys; sys.stderr = sys.stdout
+
 Language guide
 ##############
 
@@ -148,8 +153,8 @@ Shapes from ranges
 
 Casting a shape from a :class:`range` ``r`` produces a shape that:
 
-  * has a width large enough to represent both ``min(r)`` and ``max(r)``, and
-  * is signed if either ``min(r)`` or ``max(r)`` are negative, unsigned otherwise.
+  * has a width large enough to represent both ``min(r)`` and ``max(r)``, but not larger, and
+  * is signed if ``r`` contains any negative values, unsigned otherwise.
 
 Specifying a shape with a range is convenient for counters, indexes, and all other values whose width is derived from a set of numbers they must be able to fit:
 
@@ -170,12 +175,24 @@ Specifying a shape with a range is convenient for counters, indexes, and all oth
    .. doctest::
 
       >>> fencepost = C(256, range(256))
+      <...>:1: SyntaxWarning: Value 256 equals the non-inclusive end of the constant shape range(0, 256); this is likely an off-by-one error
+        fencepost = C(256, range(256))
       >>> fencepost.shape()
       unsigned(8)
       >>> fencepost.value
       0
 
    Amaranth detects uses of :class:`Const` and :class:`Signal` that invoke such an off-by-one error, and emits a diagnostic message.
+
+.. note::
+
+   An empty range always casts to an ``unsigned(0)``, even if both of its bounds are negative.
+   This happens because, being empty, it does not contain any negative values.
+
+   .. doctest::
+
+      >>> Shape.cast(range(-1, -1))
+      unsigned(0)
 
 
 .. _lang-shapeenum:
@@ -282,30 +299,25 @@ Constant-castable objects are accepted anywhere a constant integer is accepted. 
 
 .. doctest::
 
-   >>> Const.cast(Cat(Direction.TOP, Direction.LEFT))
-   (const 4'd4)
+   >>> Const.cast(Cat(C(10, 4), C(1, 2)))
+   (const 6'd26)
 
-.. TODO: uncomment when this actually works
+They may be used in enumeration members, provided the enumeration inherits from :class:`amaranth.lib.enum.Enum`:
 
-.. comment::
+.. testcode::
 
-   They may be used in enumeration members:
+   class Funct(amaranth.lib.enum.Enum, shape=4):
+       ADD = 0
+       ...
 
-   .. testcode::
+   class Op(amaranth.lib.enum.Enum, shape=1):
+       REG = 0
+       IMM = 1
 
-      class Funct(enum.Enum):
-          ADD = 0
-          ...
-
-      class Op(enum.Enum):
-          REG = 0
-          IMM = 1
-
-      class Instr(enum.Enum):
-          ADD  = Cat(Funct.ADD, Op.REG)
-          ADDI = Cat(Funct.ADD, Op.IMM)
-          ...
-
+   class Instr(amaranth.lib.enum.Enum, shape=5):
+       ADD  = Cat(Funct.ADD, Op.REG)
+       ADDI = Cat(Funct.ADD, Op.IMM)
+       ...
 
 .. note::
 
@@ -417,6 +429,14 @@ Signals assigned in a :ref:`combinatorial <lang-comb>` domain are not affected b
    False
    >>> Signal(reset_less=True).reset_less
    True
+
+
+.. _lang-data:
+
+Data structures
+===============
+
+Amaranth provides aggregate data structures in the standard library module :mod:`amaranth.lib.data`.
 
 
 .. _lang-operators:
@@ -702,7 +722,7 @@ Operation               Description                                      Notes
 ``a.bit_select(b, w)``  overlapping part select with variable offset
 ``a.word_select(b, w)`` non-overlapping part select with variable offset
 ``Cat(a, b)``           concatenation                                    [#opS3]_
-``Repl(a, n)``          replication
+``a.replicate(n)``      replication
 ======================= ================================================ ======
 
 .. [#opS1] Words "length" and "width" have the same meaning when talking about Amaranth values. Conventionally, "width" is used.
@@ -715,7 +735,7 @@ For the operators introduced by Amaranth, the following table explains them in t
 Amaranth operation        Equivalent Python code
 ======================= ======================
 ``Cat(a, b)``           ``a + b``
-``Repl(a, n)``          ``a * n``
+``a.replicate(n)``      ``a * n``
 ``a.bit_select(b, w)``  ``a[b:b+w]``
 ``a.word_select(b, w)`` ``a[b*w:b*w+w]``
 ======================= ======================

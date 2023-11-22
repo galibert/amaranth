@@ -1,7 +1,11 @@
+import warnings
+
 from enum import Enum
 
 from amaranth.hdl.ast import *
-from amaranth.hdl.rec import *
+with warnings.catch_warnings():
+    warnings.filterwarnings(action="ignore", category=DeprecationWarning)
+    from amaranth.hdl.rec import *
 
 from .utils import *
 
@@ -281,22 +285,22 @@ class RecordTestCase(FHDLTestCase):
         # __eq__, __ne__, __lt__, __le__, __gt__, __ge__
         self.assertEqual(repr(r1 == 1),  "(== (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 == s1), "(== (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 == r1), "(== (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 == r1), "(== (cat (sig r1__a)) (sig s1))")
         self.assertEqual(repr(r1 != 1),  "(!= (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 != s1), "(!= (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 != r1), "(!= (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 != r1), "(!= (cat (sig r1__a)) (sig s1))")
         self.assertEqual(repr(r1 < 1),   "(< (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 < s1),  "(< (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 < r1),  "(< (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 < r1),  "(> (cat (sig r1__a)) (sig s1))")
         self.assertEqual(repr(r1 <= 1),  "(<= (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 <= s1), "(<= (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 <= r1), "(<= (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 <= r1), "(>= (cat (sig r1__a)) (sig s1))")
         self.assertEqual(repr(r1 > 1),   "(> (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 > s1),  "(> (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 > r1),  "(> (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 > r1),  "(< (cat (sig r1__a)) (sig s1))")
         self.assertEqual(repr(r1 >= 1),  "(>= (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 >= s1), "(>= (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 >= r1), "(>= (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 >= r1), "(<= (cat (sig r1__a)) (sig s1))")
 
         # __abs__, __len__
         self.assertEqual(repr(abs(r1)), "(cat (sig r1__a))")

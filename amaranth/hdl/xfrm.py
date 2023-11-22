@@ -8,7 +8,6 @@ from .ast import *
 from .ast import _StatementList
 from .cd import *
 from .ir import *
-from .rec import *
 
 
 __all__ = ["ValueVisitor", "ValueTransformer",
@@ -63,10 +62,6 @@ class ValueVisitor(metaclass=ABCMeta):
         pass # :nocov:
 
     @abstractmethod
-    def on_Repl(self, value):
-        pass # :nocov:
-
-    @abstractmethod
     def on_ArrayProxy(self, value):
         pass # :nocov:
 
@@ -79,7 +74,7 @@ class ValueVisitor(metaclass=ABCMeta):
         pass # :nocov:
 
     def on_unknown_value(self, value):
-        raise TypeError("Cannot transform value {!r}".format(value)) # :nocov:
+        raise TypeError(f"Cannot transform value {value!r}") # :nocov:
 
     def replace_value_src_loc(self, value, new_value):
         return True
@@ -106,8 +101,6 @@ class ValueVisitor(metaclass=ABCMeta):
             new_value = self.on_Part(value)
         elif type(value) is Cat:
             new_value = self.on_Cat(value)
-        elif type(value) is Repl:
-            new_value = self.on_Repl(value)
         elif type(value) is ArrayProxy:
             new_value = self.on_ArrayProxy(value)
         elif type(value) is Sample:
@@ -156,9 +149,6 @@ class ValueTransformer(ValueVisitor):
     def on_Cat(self, value):
         return Cat(self.on_value(o) for o in value.parts)
 
-    def on_Repl(self, value):
-        return Repl(self.on_value(value.value), value.count)
-
     def on_ArrayProxy(self, value):
         return ArrayProxy([self.on_value(elem) for elem in value._iter_as_values()],
                           self.on_value(value.index))
@@ -196,7 +186,7 @@ class StatementVisitor(metaclass=ABCMeta):
         pass # :nocov:
 
     def on_unknown_statement(self, stmt):
-        raise TypeError("Cannot transform statement {!r}".format(stmt)) # :nocov:
+        raise TypeError(f"Cannot transform statement {stmt!r}") # :nocov:
 
     def replace_statement_src_loc(self, stmt, new_stmt):
         return True
@@ -310,7 +300,7 @@ class FragmentTransformer:
             value._transforms_.append(self)
             return value
         else:
-            raise AttributeError("Object {!r} cannot be elaborated".format(value))
+            raise AttributeError(f"Object {value!r} cannot be elaborated")
 
 
 class TransformedElaboratable(Elaboratable):
@@ -374,9 +364,6 @@ class DomainCollector(ValueVisitor, StatementVisitor):
         for o in value.parts:
             self.on_value(o)
 
-    def on_Repl(self, value):
-        self.on_value(value.value)
-
     def on_ArrayProxy(self, value):
         for elem in value._iter_as_values():
             self.on_value(elem)
@@ -438,9 +425,9 @@ class DomainRenamer(FragmentTransformer, ValueTransformer, StatementTransformer)
             domain_map = {"sync": domain_map}
         for src, dst in domain_map.items():
             if src == "comb":
-                raise ValueError("Domain '{}' may not be renamed".format(src))
+                raise ValueError(f"Domain '{src}' may not be renamed")
             if dst == "comb":
-                raise ValueError("Domain '{}' may not be renamed to '{}'".format(src, dst))
+                raise ValueError(f"Domain '{src}' may not be renamed to '{dst}'")
         self.domain_map = OrderedDict(domain_map)
 
     def on_ClockSignal(self, value):
@@ -544,9 +531,9 @@ class SampleLowerer(FragmentTransformer, ValueTransformer, StatementTransformer)
 
     def _name_reset(self, value):
         if isinstance(value, Const):
-            return "c${}".format(value.value), value.value
+            return f"c${value.value}", value.value
         elif isinstance(value, Signal):
-            return "s${}".format(value.name), value.reset
+            return f"s${value.name}", value.reset
         elif isinstance(value, ClockSignal):
             return "clk", 0
         elif isinstance(value, ResetSignal):
@@ -567,7 +554,7 @@ class SampleLowerer(FragmentTransformer, ValueTransformer, StatementTransformer)
         else:
             assert value.domain is not None
             sampled_name, sampled_reset = self._name_reset(value.value)
-            name = "$sample${}${}${}".format(sampled_name, value.domain, value.clocks)
+            name = f"$sample${sampled_name}${value.domain}${value.clocks}"
             sample = Signal.like(value.value, name=name, reset_less=True, reset=sampled_reset)
             sample.attrs["amaranth.sample_reg"] = True
 
@@ -733,10 +720,14 @@ class EnableInserter(_ControlInserter):
 
     def on_fragment(self, fragment):
         new_fragment = super().on_fragment(fragment)
-        if isinstance(new_fragment, Instance) and new_fragment.type in ("$memrd", "$memwr"):
-            clk_port, clk_dir = new_fragment.named_ports["CLK"]
-            if isinstance(clk_port, ClockSignal) and clk_port.domain in self.controls:
-                en_port, en_dir = new_fragment.named_ports["EN"]
-                en_port = Mux(self.controls[clk_port.domain], en_port, Const(0, len(en_port)))
-                new_fragment.named_ports["EN"] = en_port, en_dir
+        if isinstance(new_fragment, Instance) and new_fragment.type == "$mem_v2":
+            for kind in ["RD", "WR"]:
+                clk_parts = new_fragment.named_ports[kind + "_CLK"][0].parts
+                en_parts = new_fragment.named_ports[kind + "_EN"][0].parts
+                new_en = []
+                for clk, en in zip(clk_parts, en_parts):
+                    if isinstance(clk, ClockSignal) and clk.domain in self.controls:
+                        en = Mux(self.controls[clk.domain], en, Const(0, len(en)))
+                    new_en.append(en)
+                new_fragment.named_ports[kind + "_EN"] = Cat(new_en), "i"
         return new_fragment

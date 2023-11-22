@@ -13,10 +13,14 @@ __all__ = ["UnusedElaboratable", "Elaboratable", "DriverConflict", "Fragment", "
 
 
 class UnusedElaboratable(UnusedMustUse):
-    pass
+    # The warning is initially silenced. If everything that has been constructed remains unused,
+    # it means the application likely crashed (with an exception, or in another way that does not
+    # call `sys.excepthook`), and it's not necessary to show any warnings.
+    # Once elaboration starts, the warning is enabled.
+    _MustUse__silence = True
 
 
-class Elaboratable(MustUse, metaclass=ABCMeta):
+class Elaboratable(MustUse):
     _MustUse__warning = UnusedElaboratable
 
 
@@ -33,6 +37,7 @@ class Fragment:
                 return obj
             elif isinstance(obj, Elaboratable):
                 code = obj.elaborate.__code__
+                UnusedElaboratable._MustUse__silence = False
                 obj._MustUse__used = True
                 new_obj = obj.elaborate(platform)
             elif hasattr(obj, "elaborate"):
@@ -45,9 +50,9 @@ class Fragment:
                 code = obj.elaborate.__code__
                 new_obj = obj.elaborate(platform)
             else:
-                raise AttributeError("Object {!r} cannot be elaborated".format(obj))
+                raise AttributeError(f"Object {obj!r} cannot be elaborated")
             if new_obj is obj:
-                raise RecursionError("Object {!r} elaborates to itself".format(obj))
+                raise RecursionError(f"Object {obj!r} elaborates to itself")
             if new_obj is None and code is not None:
                 warnings.warn_explicit(
                     message=".elaborate() returned None; missing return statement?",
@@ -135,12 +140,12 @@ class Fragment:
             if name_or_index < len(self.subfragments):
                 subfragment, name = self.subfragments[name_or_index]
                 return subfragment
-            raise NameError("No subfragment at index #{}".format(name_or_index))
+            raise NameError(f"No subfragment at index #{name_or_index}")
         else:
             for subfragment, name in self.subfragments:
                 if name == name_or_index:
                     return subfragment
-            raise NameError("No subfragment with name '{}'".format(name_or_index))
+            raise NameError(f"No subfragment with name '{name_or_index}'")
 
     def find_generated(self, *path):
         if len(path) > 1:
@@ -176,7 +181,6 @@ class Fragment:
         assert mode in ("silent", "warn", "error")
 
         driver_subfrags = SignalDict()
-        memory_subfrags = OrderedDict()
         def add_subfrag(registry, entity, entry):
             # Because of missing domain insertion, at the point when this code runs, we have
             # a mixture of bound and unbound {Clock,Reset}Signals. Map the bound ones to
@@ -199,7 +203,7 @@ class Fragment:
         flatten_subfrags = set()
         for i, (subfrag, name) in enumerate(self.subfragments):
             if name is None:
-                name = "<unnamed #{}>".format(i)
+                name = f"<unnamed #{i}>"
             subfrag_hierarchy = hierarchy + (name,)
 
             if subfrag.flatten:
@@ -207,24 +211,16 @@ class Fragment:
                 flatten_subfrags.add((subfrag, subfrag_hierarchy))
 
             if isinstance(subfrag, Instance):
-                # For memories (which are subfragments, but semantically a part of superfragment),
-                # record that this fragment is driving it.
-                if subfrag.type in ("$memrd", "$memwr"):
-                    memory = subfrag.parameters["MEMID"]
-                    add_subfrag(memory_subfrags, memory, (None, hierarchy))
-
                 # Never flatten instances.
                 continue
 
             # First, recurse into subfragments and let them detect driver conflicts as well.
-            subfrag_drivers, subfrag_memories = \
+            subfrag_drivers = \
                 subfrag._resolve_hierarchy_conflicts(subfrag_hierarchy, mode)
 
-            # Second, classify subfragments by signals they drive and memories they use.
+            # Second, classify subfragments by signals they drive.
             for signal in subfrag_drivers:
                 add_subfrag(driver_subfrags, signal, (subfrag, subfrag_hierarchy))
-            for memory in subfrag_memories:
-                add_subfrag(memory_subfrags, memory, (subfrag, subfrag_hierarchy))
 
         # Find out the set of subfragments that needs to be flattened into this fragment
         # to resolve driver-driver conflicts.
@@ -248,20 +244,6 @@ class Fragment:
                 message += "; hierarchy will be flattened"
                 warnings.warn_explicit(message, DriverConflict, *signal.src_loc)
 
-        for memory, subfrags in memory_subfrags.items():
-            subfrag_names = flatten_subfrags_if_needed(subfrags)
-            if not subfrag_names:
-                continue
-
-            # While we're at it, show a message.
-            message = ("Memory '{}' is accessed from multiple fragments: {}"
-                       .format(memory.name, ", ".join(subfrag_names)))
-            if mode == "error":
-                raise DriverConflict(message)
-            elif mode == "warn":
-                message += "; hierarchy will be flattened"
-                warnings.warn_explicit(message, DriverConflict, *memory.src_loc)
-
         # Flatten hierarchy.
         for subfrag, subfrag_hierarchy in sorted(flatten_subfrags, key=lambda x: x[1]):
             self._merge_subfragment(subfrag)
@@ -277,20 +259,19 @@ class Fragment:
             return self._resolve_hierarchy_conflicts(hierarchy, mode)
 
         # Nothing was flattened, we're done!
-        return (SignalSet(driver_subfrags.keys()),
-                set(memory_subfrags.keys()))
+        return SignalSet(driver_subfrags.keys())
 
     def _propagate_domains_up(self, hierarchy=("top",)):
         from .xfrm import DomainRenamer
 
-        domain_subfrags = defaultdict(lambda: set())
+        domain_subfrags = defaultdict(set)
 
         # For each domain defined by a subfragment, determine which subfragments define it.
         for i, (subfrag, name) in enumerate(self.subfragments):
             # First, recurse into subfragments and let them propagate domains up as well.
             hier_name = name
             if hier_name is None:
-                hier_name = "<unnamed #{}>".format(i)
+                hier_name = f"<unnamed #{i}>"
             subfrag._propagate_domains_up(hierarchy + (hier_name,))
 
             # Second, classify subfragments by domains they define.
@@ -307,7 +288,7 @@ class Fragment:
 
             names = [n for f, n, i in subfrags]
             if not all(names):
-                names = sorted("<unnamed #{}>".format(i) if n is None else "'{}'".format(n)
+                names = sorted(f"<unnamed #{i}>" if n is None else f"'{n}'"
                                for f, n, i in subfrags)
                 raise DomainError("Domain '{}' is defined by subfragments {} of fragment '{}'; "
                                   "it is necessary to either rename subfragment domains "
@@ -315,7 +296,7 @@ class Fragment:
                                   .format(domain_name, ", ".join(names), ".".join(hierarchy)))
 
             if len(names) != len(set(names)):
-                names = sorted("#{}".format(i) for f, n, i in subfrags)
+                names = sorted(f"#{i}" for f, n, i in subfrags)
                 raise DomainError("Domain '{}' is defined by subfragments {} of fragment '{}', "
                                   "some of which have identical names; it is necessary to either "
                                   "rename subfragment domains explicitly, or give distinct names "
@@ -323,7 +304,7 @@ class Fragment:
                                   .format(domain_name, ", ".join(names), ".".join(hierarchy)))
 
             for subfrag, name, i in subfrags:
-                domain_name_map = {domain_name: "{}_{}".format(name, domain_name)}
+                domain_name_map = {domain_name: f"{name}_{domain_name}"}
                 self.subfragments[i] = (DomainRenamer(domain_name_map)(subfrag), name)
 
         # Finally, collect the (now unique) subfragment domains, and merge them into our domains.
@@ -356,7 +337,7 @@ class Fragment:
                 continue
             value = missing_domain(domain_name)
             if value is None:
-                raise DomainError("Domain '{}' is used but not defined".format(domain_name))
+                raise DomainError(f"Domain '{domain_name}' is used but not defined")
             if type(value) is ClockDomain:
                 self.add_domains(value)
                 # And expose ports on the newly added clock domain, since it is added directly
@@ -369,8 +350,8 @@ class Fragment:
                     raise DomainError(
                         "Fragment returned by missing domain callback does not define "
                         "requested domain '{}' (defines {})."
-                        .format(domain_name, ", ".join("'{}'".format(n) for n in defined)))
-                self.add_subfragment(new_fragment, "cd_{}".format(domain_name))
+                        .format(domain_name, ", ".join(f"'{n}'" for n in defined)))
+                self.add_subfragment(new_fragment, f"cd_{domain_name}")
                 self.add_domains(new_fragment.domains.values())
         return new_domains
 

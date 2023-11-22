@@ -1,8 +1,12 @@
 from collections import OrderedDict
+import warnings
 
 from ..hdl.ast import *
-from ..hdl.rec import *
+with warnings.catch_warnings():
+    warnings.filterwarnings(action="ignore", category=DeprecationWarning)
+    from ..hdl.rec import *
 from ..lib.io import *
+from ..lib import wiring
 
 from .dsl import *
 
@@ -33,7 +37,7 @@ class ResourceManager:
     def add_resources(self, resources):
         for res in resources:
             if not isinstance(res, Resource):
-                raise TypeError("Object {!r} is not a Resource".format(res))
+                raise TypeError(f"Object {res!r} is not a Resource")
             if (res.name, res.number) in self.resources:
                 raise NameError("Trying to add {!r}, but {!r} has the same name and number"
                                 .format(res, self.resources[res.name, res.number]))
@@ -42,7 +46,7 @@ class ResourceManager:
     def add_connectors(self, connectors):
         for conn in connectors:
             if not isinstance(conn, Connector):
-                raise TypeError("Object {!r} is not a Connector".format(conn))
+                raise TypeError(f"Object {conn!r} is not a Connector")
             if (conn.name, conn.number) in self.connectors:
                 raise NameError("Trying to add {!r}, but {!r} has the same name and number"
                                 .format(conn, self.connectors[conn.name, conn.number]))
@@ -116,31 +120,43 @@ class ResourceManager:
                 fields = OrderedDict()
                 for sub in resource.ios:
                     fields[sub.name] = resolve(sub, dir[sub.name], xdr[sub.name],
-                                               name="{}__{}".format(name, sub.name),
+                                               name=f"{name}__{sub.name}",
                                                attrs={**attrs, **sub.attrs})
-                return Record([
+                rec = Record([
                     (f_name, f.layout) for (f_name, f) in fields.items()
                 ], fields=fields, name=name)
+                rec.signature = wiring.Signature({
+                    f_name: wiring.Out(f.signature) for (f_name, f) in fields.items()
+                })
+                return rec
 
             elif isinstance(resource.ios[0], (Pins, DiffPairs)):
                 phys = resource.ios[0]
+                # The flow is `In` below regardless of requested pin direction. The flow should
+                # never be used as it's not used internally and anyone using `dir="-"` should
+                # ignore it as well.
                 if isinstance(phys, Pins):
                     phys_names = phys.names
                     port = Record([("io", len(phys))], name=name)
+                    port.signature = wiring.Signature({"io": wiring.In(len(phys))})
                 if isinstance(phys, DiffPairs):
                     phys_names = []
-                    record_fields = []
+                    rec_members = []
+                    sig_members = {}
                     if not self.should_skip_port_component(None, attrs, "p"):
                         phys_names += phys.p.names
-                        record_fields.append(("p", len(phys)))
+                        rec_members.append(("p", len(phys)))
+                        sig_members["p"] = wiring.In(len(phys))
                     if not self.should_skip_port_component(None, attrs, "n"):
                         phys_names += phys.n.names
-                        record_fields.append(("n", len(phys)))
-                    port = Record(record_fields, name=name)
+                        rec_members.append(("n", len(phys)))
+                        sig_members["n"] = wiring.In(len(phys))
+                    port = Record(rec_members, name=name)
+                    port.signature = wiring.Signature(sig_members)
                 if dir == "-":
                     pin = None
                 else:
-                    pin = Pin(len(phys), dir, xdr=xdr, name=name)
+                    pin = wiring.flipped(Pin(len(phys), dir, xdr=xdr, name=name))
 
                 for phys_name in phys_names:
                     if phys_name in self._phys_reqd:
@@ -162,7 +178,7 @@ class ResourceManager:
 
         value = resolve(resource,
             *merge_options(resource, dir, xdr),
-            name="{}_{}".format(resource.name, resource.number),
+            name=f"{resource.name}_{resource.number}",
             attrs=resource.attrs)
         self._requested[resource.name, resource.number] = value
         return value
@@ -216,13 +232,13 @@ class ResourceManager:
                 yield port_name, pin_names[0], attrs
             else:
                 for bit, pin_name in enumerate(pin_names):
-                    yield "{}[{}]".format(port_name, bit), pin_name, attrs
+                    yield f"{port_name}[{bit}]", pin_name, attrs
 
     def add_clock_constraint(self, clock, frequency):
         if not isinstance(clock, Signal):
-            raise TypeError("Object {!r} is not a Signal".format(clock))
+            raise TypeError(f"Object {clock!r} is not a Signal")
         if not isinstance(frequency, (int, float)):
-            raise TypeError("Frequency must be a number, not {!r}".format(frequency))
+            raise TypeError(f"Frequency must be a number, not {frequency!r}")
 
         if clock in self._clocks:
             raise ValueError("Cannot add clock constraint on {!r}, which is already constrained "

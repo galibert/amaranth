@@ -83,12 +83,6 @@ class _MemoryPort(CompatModule):
         self.clock = ClockSignal(clock_domain)
 
 
-@extend(NativeMemory)
-@deprecated("it is not necessary or permitted to add Memory as a special or submodule")
-def elaborate(self, platform):
-    return Fragment()
-
-
 class CompatMemory(NativeMemory, Elaboratable):
     def __init__(self, width, depth, init=None, name=None):
         super().__init__(width=width, depth=depth, init=init, name=name)
@@ -109,7 +103,7 @@ class CompatMemory(NativeMemory, Elaboratable):
         assert mode != NO_CHANGE
         rdport = self.read_port(domain="comb" if async_read else clock_domain,
                                 transparent=mode == WRITE_FIRST)
-        rdport.addr.name = "{}_addr".format(self.name)
+        rdport.addr.name = f"{self.name}_addr"
         adr = rdport.addr
         dat_r = rdport.data
         if write_capable:

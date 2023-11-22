@@ -6,6 +6,7 @@ import re
 
 from .._utils import bits_for, flatten
 from ..hdl import ast, ir, mem, xfrm
+from ..lib import wiring
 
 
 __all__ = ["convert", "convert_fragment"]
@@ -28,15 +29,15 @@ def _signed(value):
     elif isinstance(value, ast.Const):
         return value.signed
     else:
-        assert False, "Invalid constant {!r}".format(value)
+        assert False, f"Invalid constant {value!r}"
 
 
 def _const(value):
     if isinstance(value, str):
-        return "\"{}\"".format(value.translate(_escape_map))
+        return f"\"{value.translate(_escape_map)}\""
     elif isinstance(value, int):
         if value in range(0, 2**31-1):
-            return "{:d}".format(value)
+            return f"{value:d}"
         else:
             # This code path is only used for Instances, where Verilog-like behavior is desirable.
             # Verilog ensures that integers with unspecified width are 32 bits wide or more.
@@ -46,7 +47,7 @@ def _const(value):
         value_twos_compl = value.value & ((1 << value.width) - 1)
         return "{}'{:0{}b}".format(value.width, value_twos_compl, value.width)
     else:
-        assert False, "Invalid constant {!r}".format(value)
+        assert False, f"Invalid constant {value!r}"
 
 
 class _Namer:
@@ -57,7 +58,7 @@ class _Namer:
         self._names = set()
 
     def anonymous(self):
-        name = "U$${}".format(self._anon)
+        name = f"U$${self._anon}"
         assert name not in self._names
         self._anon += 1
         return name
@@ -65,12 +66,12 @@ class _Namer:
     def _make_name(self, name, local):
         if name is None:
             self._index += 1
-            name = "${}".format(self._index)
+            name = f"${self._index}"
         elif not local and name[0] not in "\\$":
-            name = "\\{}".format(name)
+            name = f"\\{name}"
         while name in self._names:
             self._index += 1
-            name = "{}${}".format(name, self._index)
+            name = f"{name}${self._index}"
         self._names.add(name)
         return name
 
@@ -258,7 +259,7 @@ class _SwitchBuilder(_AttrBuilder, _ProxiedBuilder):
             self._append("{}case\n", "  " * (self.indent + 1))
         else:
             self._append("{}case {}\n", "  " * (self.indent + 1),
-                         ", ".join("{}'{}".format(len(value), value) for value in values))
+                         ", ".join(f"{len(value)}'{value}" for value in values))
         return _CaseBuilder(self.rtlil, self.indent + 2)
 
 
@@ -286,7 +287,7 @@ def _src(src_loc):
     if src_loc is None:
         return None
     file, line = src_loc
-    return "{}:{}".format(file, line)
+    return f"{file}:{line}"
 
 
 class _LegalizeValue(Exception):
@@ -331,7 +332,7 @@ class _ValueCompilerState:
         else:
             port_id = port_kind = None
         if prefix is not None:
-            wire_name = "{}_{}".format(prefix, signal.name)
+            wire_name = f"{prefix}_{signal.name}"
         else:
             wire_name = signal.name
 
@@ -415,9 +416,9 @@ class _ValueCompiler(xfrm.ValueVisitor):
         if value.start == value.stop:
             return "{}"
         elif value.start + 1 == value.stop:
-            return "{} [{}]".format(sigspec, value.start)
+            return f"{sigspec} [{value.start}]"
         else:
-            return "{} [{}:{}]".format(sigspec, value.stop - 1, value.start)
+            return f"{sigspec} [{value.stop - 1}:{value.start}]"
 
     def on_ArrayProxy(self, value):
         index = self.s.expand(value.index)
@@ -632,9 +633,6 @@ class _RHSValueCompiler(_ValueCompiler):
         }, src=_src(value.src_loc))
         return res
 
-    def on_Repl(self, value):
-        return "{{ {} }}".format(" ".join(self(value.value) for _ in range(value.count)))
-
 
 class _LHSValueCompiler(_ValueCompiler):
     def on_Const(self, value):
@@ -663,11 +661,11 @@ class _LHSValueCompiler(_ValueCompiler):
         else: # new_shape.width > value_shape.width
             dummy_bits = new_shape.width - value_shape.width
             dummy_wire = self.s.rtlil.wire(dummy_bits)
-            return "{{ {} {} }}".format(dummy_wire, self(value))
+            return f"{{ {dummy_wire} {self(value)} }}"
 
     def on_Signal(self, value):
         if value not in self.s.driven:
-            raise ValueError("No LHS wire for non-driven signal {}".format(repr(value)))
+            raise ValueError(f"No LHS wire for non-driven signal {value!r}")
         wire_curr, wire_next = self.s.resolve(value)
         return wire_next or wire_curr
 
@@ -685,7 +683,7 @@ class _LHSValueCompiler(_ValueCompiler):
                 return slice
             else:
                 dummy_wire = self.s.rtlil.wire(stop - len(value.value))
-                return "{{ {} {} }}".format(dummy_wire, slice)
+                return f"{{ {dummy_wire} {slice} }}"
         else:
             # Only so many possible parts. The amount of branches is exponential; if value.offset
             # is large (e.g. 32-bit wide), trying to naively legalize it is likely to exhaust
@@ -694,9 +692,6 @@ class _LHSValueCompiler(_ValueCompiler):
             raise _LegalizeValue(value.offset,
                                  range(1 << len(value.offset))[:max_branches],
                                  value.src_loc)
-
-    def on_Repl(self, value):
-        raise TypeError # :nocov:
 
 
 class _StatementCompiler(xfrm.StatementVisitor):
@@ -818,29 +813,23 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
     if isinstance(fragment, ir.Instance):
         port_map = OrderedDict()
         for port_name, (value, dir) in fragment.named_ports.items():
-            port_map["\\{}".format(port_name)] = value
+            port_map[f"\\{port_name}"] = value
 
         if fragment.type[0] == "$":
             return fragment.type, port_map
         else:
-            return "\\{}".format(fragment.type), port_map
+            return f"\\{fragment.type}", port_map
 
-    module_name  = hierarchy[-1] or "anonymous"
+    module_name  = ".".join(name or "anonymous" for name in hierarchy)
     module_attrs = OrderedDict()
     if len(hierarchy) == 1:
         module_attrs["top"] = 1
-    module_attrs["amaranth.hierarchy"] = ".".join(name or "anonymous" for name in hierarchy)
 
     with builder.module(module_name, attrs=module_attrs) as module:
         compiler_state = _ValueCompilerState(module)
         rhs_compiler   = _RHSValueCompiler(compiler_state)
         lhs_compiler   = _LHSValueCompiler(compiler_state)
         stmt_compiler  = _StatementCompiler(compiler_state, rhs_compiler, lhs_compiler)
-
-        # If the fragment is completely empty, add a dummy wire to it, or Yosys will interpret
-        # it as a black box by default (when read as Verilog).
-        if not fragment.ports and not fragment.statements and not fragment.subfragments:
-            module.wire(1, name="$empty_module_filler")
 
         # Register all signals driven in the current fragment. This must be done first, as it
         # affects further codegen; e.g. whether \sig$next signals will be generated and used.
@@ -866,52 +855,30 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
         # name) names.
         memories = OrderedDict()
         for subfragment, sub_name in fragment.subfragments:
+            if not (subfragment.ports or subfragment.statements or subfragment.subfragments):
+                # If the fragment is completely empty, skip translating it, otherwise synthesis
+                # tools (including Yosys and Vivado) will treat it as a black box when it is
+                # loaded after conversion to Verilog.
+                continue
+
             if sub_name is None:
                 sub_name = module.anonymous()
 
-            sub_params = OrderedDict()
-            if hasattr(subfragment, "parameters"):
-                for param_name, param_value in subfragment.parameters.items():
-                    if isinstance(param_value, mem.Memory):
-                        memory = param_value
-                        if memory not in memories:
-                            memories[memory] = module.memory(width=memory.width, size=memory.depth,
-                                                             name=memory.name, attrs=memory.attrs)
-                            addr_bits = bits_for(memory.depth)
-                            data_parts = []
-                            data_mask = (1 << memory.width) - 1
-                            for addr in range(memory.depth):
-                                if addr < len(memory.init):
-                                    data = memory.init[addr] & data_mask
-                                else:
-                                    data = 0
-                                data_parts.append("{:0{}b}".format(data, memory.width))
-                            module.cell("$meminit", ports={
-                                "\\ADDR": rhs_compiler(ast.Const(0, addr_bits)),
-                                "\\DATA": "{}'".format(memory.width * memory.depth) +
-                                          "".join(reversed(data_parts)),
-                            }, params={
-                                "MEMID": memories[memory],
-                                "ABITS": addr_bits,
-                                "WIDTH": memory.width,
-                                "WORDS": memory.depth,
-                                "PRIORITY": 0,
-                            })
-
-                        param_value = memories[memory]
-
-                    sub_params[param_name] = param_value
+            sub_params = OrderedDict(getattr(subfragment, "parameters", {}))
 
             sub_type, sub_port_map = \
                 _convert_fragment(builder, subfragment, name_map,
                                   hierarchy=hierarchy + (sub_name,))
 
+            if sub_type == "$mem_v2" and "MEMID" not in sub_params:
+                sub_params["MEMID"] = builder._make_name(sub_name, local=False)
+            
             sub_ports = OrderedDict()
             for port, value in sub_port_map.items():
                 if not isinstance(subfragment, ir.Instance):
                     for signal in value._rhs_signals():
                         compiler_state.resolve_curr(signal, prefix=sub_name)
-                if len(value) > 0:
+                if len(value) > 0 or sub_type == "$mem_v2":
                     sub_ports[port] = rhs_compiler(value)
 
             module.cell(sub_type, name=sub_name, ports=sub_ports, params=sub_params,
@@ -931,7 +898,7 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
             lhs_group_filter = xfrm.LHSGroupFilter(group_signals)
             group_stmts = lhs_group_filter(fragment.statements)
 
-            with module.process(name="$group_{}".format(group)) as process:
+            with module.process(name=f"$group_{group}") as process:
                 with process.case() as case:
                     # For every signal in comb domain, assign \sig$next to the reset value.
                     # For every signal in sync domains, assign \sig$next to the current
@@ -1037,7 +1004,18 @@ def convert_fragment(fragment, name="top", *, emit_src=True):
     return str(builder), name_map
 
 
-def convert(elaboratable, name="top", platform=None, *, ports, emit_src=True, **kwargs):
+def convert(elaboratable, name="top", platform=None, *, ports=None, emit_src=True, **kwargs):
+    if (ports is None and
+            hasattr(elaboratable, "signature") and
+            isinstance(elaboratable.signature, wiring.Signature)):
+        ports = []
+        for path, member, value in elaboratable.signature.flatten(elaboratable):
+            if isinstance(value, ast.ValueCastable):
+                value = value.as_value()
+            if isinstance(value, ast.Value):
+                ports.append(value)
+    elif ports is None:
+        raise TypeError("The `convert()` function requires a `ports=` argument")
     fragment = ir.Fragment.get(elaboratable, platform).prepare(ports=ports, **kwargs)
     il_text, name_map = convert_fragment(fragment, name, emit_src=emit_src)
     return il_text

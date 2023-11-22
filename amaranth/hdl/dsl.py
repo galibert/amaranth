@@ -3,6 +3,7 @@ from contextlib import contextmanager, _GeneratorContextManager
 from functools import wraps
 from enum import Enum
 import warnings
+import sys
 
 from .._utils import flatten, bits_for
 from .. import tracer
@@ -220,7 +221,8 @@ class Module(_ModuleBuilderRoot, Elaboratable):
 
     def _check_signed_cond(self, cond):
         cond = Value.cast(cond)
-        if cond.shape().signed:
+        if sys.version_info < (3, 12, 0) and cond.shape().signed:
+            # TODO(py3.11): remove; ~True is a warning in 3.12+, finally!
             warnings.warn("Signed values in If/Elif conditions usually result from inverting "
                           "Python booleans with ~, which leads to unexpected results. "
                           "Replace `~flag` with `not flag`. (If this is a false positive, "
@@ -366,10 +368,10 @@ class Module(_ModuleBuilderRoot, Elaboratable):
     def FSM(self, reset=None, domain="sync", name="fsm"):
         self._check_context("FSM", context=None)
         if domain == "comb":
-            raise ValueError("FSM may not be driven by the '{}' domain".format(domain))
+            raise ValueError(f"FSM may not be driven by the '{domain}' domain")
         fsm_data = self._set_ctrl("FSM", {
             "name":     name,
-            "signal":   Signal(name="{}_state".format(name), src_loc_at=2),
+            "signal":   Signal(name=f"{name}_state", src_loc_at=2),
             "reset":    reset,
             "domain":   domain,
             "encoding": OrderedDict(),
@@ -399,7 +401,7 @@ class Module(_ModuleBuilderRoot, Elaboratable):
         src_loc = tracer.get_src_loc(src_loc_at=1)
         fsm_data = self._get_ctrl("FSM")
         if name in fsm_data["states"]:
-            raise NameError("FSM state '{}' is already defined".format(name))
+            raise NameError(f"FSM state '{name}' is already defined")
         if name not in fsm_data["encoding"]:
             fsm_data["encoding"][name] = len(fsm_data["encoding"])
         try:
@@ -476,7 +478,7 @@ class Module(_ModuleBuilderRoot, Elaboratable):
                 fsm_signal.reset = fsm_encoding[fsm_reset]
             # The FSM is encoded such that the state with encoding 0 is always the reset state.
             fsm_decoding.update((n, s) for s, n in fsm_encoding.items())
-            fsm_signal.decoder = lambda n: "{}/{}".format(fsm_decoding[n], n)
+            fsm_signal.decoder = lambda n: f"{fsm_decoding[n]}/{n}"
             self._statements.append(Switch(fsm_signal,
                 OrderedDict((fsm_encoding[name], stmts) for name, stmts in fsm_states.items()),
                 src_loc=src_loc, case_src_locs={fsm_encoding[name]: fsm_state_src_locs[name]
@@ -521,18 +523,18 @@ class Module(_ModuleBuilderRoot, Elaboratable):
             self._anon_submodules.append(submodule)
         else:
             if name in self._named_submodules:
-                raise NameError("Submodule named '{}' already exists".format(name))
+                raise NameError(f"Submodule named '{name}' already exists")
             self._named_submodules[name] = submodule
 
     def _get_submodule(self, name):
         if name in self._named_submodules:
             return self._named_submodules[name]
         else:
-            raise AttributeError("No submodule named '{}' exists".format(name))
+            raise AttributeError(f"No submodule named '{name}' exists")
 
     def _add_domain(self, cd):
         if cd.name in self._domains:
-            raise NameError("Clock domain named '{}' already exists".format(cd.name))
+            raise NameError(f"Clock domain named '{cd.name}' already exists")
         self._domains[cd.name] = cd
 
     def _flush(self):

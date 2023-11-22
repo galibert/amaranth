@@ -1,4 +1,5 @@
 from abc import ABCMeta, abstractmethod
+import inspect
 import warnings
 import functools
 from collections import OrderedDict
@@ -45,6 +46,12 @@ class ShapeCastable:
         if not hasattr(cls, "as_shape"):
             raise TypeError(f"Class '{cls.__name__}' deriving from `ShapeCastable` must override "
                             f"the `as_shape` method")
+        if not (hasattr(cls, "__call__") and inspect.isfunction(cls.__call__)):
+            raise TypeError(f"Class '{cls.__name__}' deriving from `ShapeCastable` must override "
+                            f"the `__call__` method")
+        if not hasattr(cls, "const"):
+            raise TypeError(f"Class '{cls.__name__}' deriving from `ShapeCastable` must override "
+                            f"the `const` method")
 
 
 class Shape:
@@ -71,11 +78,15 @@ class Shape:
         If ``False``, the value is unsigned. If ``True``, the value is signed two's complement.
     """
     def __init__(self, width=1, signed=False):
-        if not isinstance(width, int) or width < 0:
-            raise TypeError("Width must be a non-negative integer, not {!r}"
-                            .format(width))
+        if not isinstance(width, int):
+            raise TypeError(f"Width must be an integer, not {width!r}")
+        if not signed and width < 0:
+            raise TypeError(f"Width of an unsigned value must be zero or a positive integer, "
+                            f"not {width}")
+        if signed and width <= 0:
+            raise TypeError(f"Width of a signed value must be a positive integer, not {width}")
         self.width = width
-        self.signed = signed
+        self.signed = bool(signed)
 
     # The algorithm for inferring shape for standard Python enumerations is factored out so that
     # `Shape.cast()` and Amaranth's `EnumMeta.as_shape()` can both use it.
@@ -109,26 +120,26 @@ class Shape:
                 return Shape(obj)
             elif isinstance(obj, range):
                 if len(obj) == 0:
-                    return Shape(0, obj.start < 0)
-                signed = obj.start < 0 or (obj.stop - obj.step) < 0
-                width  = max(bits_for(obj.start, signed),
-                             bits_for(obj.stop - obj.step, signed))
+                    return Shape(0)
+                signed = obj[0] < 0 or obj[-1] < 0
+                width  = max(bits_for(obj[0], signed),
+                             bits_for(obj[-1], signed))
                 return Shape(width, signed)
             elif isinstance(obj, type) and issubclass(obj, Enum):
                 # For compatibility with third party enumerations, handle them as if they were
                 # defined as subclasses of lib.enum.Enum with no explicitly specified shape.
                 return Shape._cast_plain_enum(obj)
             else:
-                raise TypeError("Object {!r} cannot be converted to an Amaranth shape".format(obj))
+                raise TypeError(f"Object {obj!r} cannot be converted to an Amaranth shape")
             if new_obj is obj:
-                raise RecursionError("Shape-castable object {!r} casts to itself".format(obj))
+                raise RecursionError(f"Shape-castable object {obj!r} casts to itself")
             obj = new_obj
 
     def __repr__(self):
         if self.signed:
-            return "signed({})".format(self.width)
+            return f"signed({self.width})"
         else:
-            return "unsigned({})".format(self.width)
+            return f"unsigned({self.width})"
 
     def __eq__(self, other):
         return (isinstance(other, Shape) and
@@ -143,6 +154,25 @@ def unsigned(width):
 def signed(width):
     """Shorthand for ``Shape(width, signed=True)``."""
     return Shape(width, signed=True)
+
+
+def _overridable_by_reflected(method_name):
+    """Allow overriding the decorated method.
+
+    Allows :class:`ValueCastable` to override the decorated method by implementing
+    a reflected method named ``method_name``. Intended for operators, but
+    also usable for other methods that have a reflected counterpart.
+    """
+    def decorator(f):
+        @functools.wraps(f)
+        def wrapper(self, other):
+            if isinstance(other, ValueCastable) and hasattr(other, method_name):
+                res = getattr(other, method_name)(self)
+                if res is not NotImplemented:
+                    return res
+            return f(self, other)
+        return wrapper
+    return decorator
 
 
 class Value(metaclass=ABCMeta):
@@ -164,9 +194,9 @@ class Value(metaclass=ABCMeta):
             elif isinstance(obj, int):
                 return Const(obj)
             else:
-                raise TypeError("Object {!r} cannot be converted to an Amaranth value".format(obj))
+                raise TypeError(f"Object {obj!r} cannot be converted to an Amaranth value")
             if new_obj is obj:
-                raise RecursionError("Value-castable object {!r} casts to itself".format(obj))
+                raise RecursionError(f"Value-castable object {obj!r} casts to itself")
             obj = new_obj
 
     def __init__(self, *, src_loc_at=0):
@@ -184,26 +214,31 @@ class Value(metaclass=ABCMeta):
     def __neg__(self):
         return Operator("-", [self])
 
+    @_overridable_by_reflected("__radd__")
     def __add__(self, other):
-        return Operator("+", [self, other])
+        return Operator("+", [self, other], src_loc_at=1)
     def __radd__(self, other):
         return Operator("+", [other, self])
+    @_overridable_by_reflected("__rsub__")
     def __sub__(self, other):
-        return Operator("-", [self, other])
+        return Operator("-", [self, other], src_loc_at=1)
     def __rsub__(self, other):
         return Operator("-", [other, self])
 
+    @_overridable_by_reflected("__rmul__")
     def __mul__(self, other):
-        return Operator("*", [self, other])
+        return Operator("*", [self, other], src_loc_at=1)
     def __rmul__(self, other):
         return Operator("*", [other, self])
 
+    @_overridable_by_reflected("__rmod__")
     def __mod__(self, other):
-        return Operator("%", [self, other])
+        return Operator("%", [self, other], src_loc_at=1)
     def __rmod__(self, other):
         return Operator("%", [other, self])
+    @_overridable_by_reflected("__rfloordiv__")
     def __floordiv__(self, other):
-        return Operator("//", [self, other])
+        return Operator("//", [self, other], src_loc_at=1)
     def __rfloordiv__(self, other):
         return Operator("//", [other, self])
 
@@ -213,50 +248,61 @@ class Value(metaclass=ABCMeta):
             # by a signed value to make sure the shift amount can always be interpreted as
             # an unsigned value.
             raise TypeError("Shift amount must be unsigned")
+    @_overridable_by_reflected("__rlshift__")
     def __lshift__(self, other):
         other = Value.cast(other)
         other.__check_shamt()
-        return Operator("<<", [self, other])
+        return Operator("<<", [self, other], src_loc_at=1)
     def __rlshift__(self, other):
         self.__check_shamt()
         return Operator("<<", [other, self])
+    @_overridable_by_reflected("__rrshift__")
     def __rshift__(self, other):
         other = Value.cast(other)
         other.__check_shamt()
-        return Operator(">>", [self, other])
+        return Operator(">>", [self, other], src_loc_at=1)
     def __rrshift__(self, other):
         self.__check_shamt()
         return Operator(">>", [other, self])
 
+    @_overridable_by_reflected("__rand__")
     def __and__(self, other):
-        return Operator("&", [self, other])
+        return Operator("&", [self, other], src_loc_at=1)
     def __rand__(self, other):
         return Operator("&", [other, self])
+    @_overridable_by_reflected("__rxor__")
     def __xor__(self, other):
-        return Operator("^", [self, other])
+        return Operator("^", [self, other], src_loc_at=1)
     def __rxor__(self, other):
         return Operator("^", [other, self])
+    @_overridable_by_reflected("__ror__")
     def __or__(self, other):
-        return Operator("|", [self, other])
+        return Operator("|", [self, other], src_loc_at=1)
     def __ror__(self, other):
         return Operator("|", [other, self])
 
+    @_overridable_by_reflected("__eq__")
     def __eq__(self, other):
-        return Operator("==", [self, other])
+        return Operator("==", [self, other], src_loc_at=1)
+    @_overridable_by_reflected("__ne__")
     def __ne__(self, other):
-        return Operator("!=", [self, other])
+        return Operator("!=", [self, other], src_loc_at=1)
+    @_overridable_by_reflected("__gt__")
     def __lt__(self, other):
-        return Operator("<", [self, other])
+        return Operator("<", [self, other], src_loc_at=1)
+    @_overridable_by_reflected("__ge__")
     def __le__(self, other):
-        return Operator("<=", [self, other])
+        return Operator("<=", [self, other], src_loc_at=1)
+    @_overridable_by_reflected("__lt__")
     def __gt__(self, other):
-        return Operator(">", [self, other])
+        return Operator(">", [self, other], src_loc_at=1)
+    @_overridable_by_reflected("__le__")
     def __ge__(self, other):
-        return Operator(">=", [self, other])
+        return Operator(">=", [self, other], src_loc_at=1)
 
     def __abs__(self):
         if self.shape().signed:
-            return Mux(self >= 0, self, -self)
+            return Mux(self >= 0, self, -self)[:len(self)]
         else:
             return self
 
@@ -270,14 +316,14 @@ class Value(metaclass=ABCMeta):
                 raise IndexError(f"Index {key} is out of bounds for a {n}-bit value")
             if key < 0:
                 key += n
-            return Slice(self, key, key + 1)
+            return Slice(self, key, key + 1, src_loc_at=1)
         elif isinstance(key, slice):
             start, stop, step = key.indices(n)
             if step != 1:
                 return Cat(self[i] for i in range(start, stop, step))
-            return Slice(self, start, stop)
+            return Slice(self, start, stop, src_loc_at=1)
         else:
-            raise TypeError("Cannot index value with {}".format(repr(key)))
+            raise TypeError(f"Cannot index value with {key!r}")
 
     def as_unsigned(self):
         """Conversion to unsigned.
@@ -464,7 +510,7 @@ class Value(metaclass=ABCMeta):
             If the amount is positive, the input shifted left. Otherwise, the input shifted right.
         """
         if not isinstance(amount, int):
-            raise TypeError("Shift amount must be an integer, not {!r}".format(amount))
+            raise TypeError(f"Shift amount must be an integer, not {amount!r}")
         if amount < 0:
             return self.shift_right(-amount)
         if self.shape().signed:
@@ -486,7 +532,7 @@ class Value(metaclass=ABCMeta):
             If the amount is positive, the input shifted right. Otherwise, the input shifted left.
         """
         if not isinstance(amount, int):
-            raise TypeError("Shift amount must be an integer, not {!r}".format(amount))
+            raise TypeError(f"Shift amount must be an integer, not {amount!r}")
         if amount < 0:
             return self.shift_left(-amount)
         if self.shape().signed:
@@ -508,8 +554,9 @@ class Value(metaclass=ABCMeta):
             If the amount is positive, the input rotated left. Otherwise, the input rotated right.
         """
         if not isinstance(amount, int):
-            raise TypeError("Rotate amount must be an integer, not {!r}".format(amount))
-        amount %= len(self)
+            raise TypeError(f"Rotate amount must be an integer, not {amount!r}")
+        if len(self) != 0:
+            amount %= len(self)
         return Cat(self[-amount:], self[:-amount]) # meow :3
 
     def rotate_right(self, amount):
@@ -526,9 +573,33 @@ class Value(metaclass=ABCMeta):
             If the amount is positive, the input rotated right. Otherwise, the input rotated right.
         """
         if not isinstance(amount, int):
-            raise TypeError("Rotate amount must be an integer, not {!r}".format(amount))
-        amount %= len(self)
+            raise TypeError(f"Rotate amount must be an integer, not {amount!r}")
+        if len(self) != 0:
+            amount %= len(self)
         return Cat(self[amount:], self[:amount])
+
+    def replicate(self, count):
+        """Replication.
+
+        A ``Value`` is replicated (repeated) several times to be used
+        on the RHS of assignments::
+
+            len(v.replicate(n)) == len(v) * n
+
+        Parameters
+        ----------
+        count : int
+            Number of replications.
+
+        Returns
+        -------
+        Value, out
+            Replicated value.
+        """
+        if not isinstance(count, int) or count < 0:
+            raise TypeError("Replication count must be a non-negative integer, not {!r}"
+                            .format(count))
+        return Cat(self for _ in range(count))
 
     def eq(self, value):
         """Assignment.
@@ -564,11 +635,11 @@ class Value(metaclass=ABCMeta):
         pass # :nocov:
 
     def _lhs_signals(self):
-        raise TypeError("Value {!r} cannot be used in assignments".format(self))
+        raise TypeError(f"Value {self!r} cannot be used in assignments")
 
     @abstractmethod
     def _rhs_signals(self):
-        pass # :nocov:
+        raise NotImplementedError # :nocov:
 
 
 @final
@@ -620,7 +691,7 @@ class Const(Value):
                 width += len(const)
             return Const(value, width)
         else:
-            raise TypeError("Value {!r} cannot be converted to an Amaranth constant".format(obj))
+            raise TypeError(f"Value {obj!r} cannot be converted to an Amaranth constant")
 
     def __init__(self, value, shape=None, *, src_loc_at=0):
         # We deliberately do not call Value.__init__ here.
@@ -640,7 +711,7 @@ class Const(Value):
             shape = Shape.cast(shape, src_loc_at=1 + src_loc_at)
         self.width  = shape.width
         self.signed = shape.signed
-        if self.signed and self.value >> (self.width - 1):
+        if self.signed and self.value >> (self.width - 1) & 1:
             self.value |= -(1 << self.width)
         else:
             self.value &= (1 << self.width) - 1
@@ -721,9 +792,12 @@ class Operator(Value):
                 return Shape(a_shape.width, True)
         elif len(op_shapes) == 2:
             a_shape, b_shape = op_shapes
-            if self.operator in ("+", "-"):
+            if self.operator == "+":
                 o_shape = _bitwise_binary_shape(*op_shapes)
                 return Shape(o_shape.width + 1, o_shape.signed)
+            if self.operator == "-":
+                o_shape = _bitwise_binary_shape(*op_shapes)
+                return Shape(o_shape.width + 1, True)
             if self.operator == "*":
                 return Shape(a_shape.width + b_shape.width, a_shape.signed or b_shape.signed)
             if self.operator == "//":
@@ -782,24 +856,25 @@ def Mux(sel, val1, val0):
 class Slice(Value):
     def __init__(self, value, start, stop, *, src_loc_at=0):
         if not isinstance(start, int):
-            raise TypeError("Slice start must be an integer, not {!r}".format(start))
+            raise TypeError(f"Slice start must be an integer, not {start!r}")
         if not isinstance(stop, int):
-            raise TypeError("Slice stop must be an integer, not {!r}".format(stop))
+            raise TypeError(f"Slice stop must be an integer, not {stop!r}")
 
+        value = Value.cast(value)
         n = len(value)
-        if start not in range(-(n+1), n+1):
-            raise IndexError("Cannot start slice {} bits into {}-bit value".format(start, n))
+        if start not in range(-n, n+1):
+            raise IndexError(f"Cannot start slice {start} bits into {n}-bit value")
         if start < 0:
             start += n
-        if stop not in range(-(n+1), n+1):
-            raise IndexError("Cannot stop slice {} bits into {}-bit value".format(stop, n))
+        if stop not in range(-n, n+1):
+            raise IndexError(f"Cannot stop slice {stop} bits into {n}-bit value")
         if stop < 0:
             stop += n
         if start > stop:
-            raise IndexError("Slice start {} must be less than slice stop {}".format(start, stop))
+            raise IndexError(f"Slice start {start} must be less than slice stop {stop}")
 
         super().__init__(src_loc_at=src_loc_at)
-        self.value = Value.cast(value)
+        self.value = value
         self.start = int(start)
         self.stop  = int(stop)
 
@@ -813,20 +888,25 @@ class Slice(Value):
         return self.value._rhs_signals()
 
     def __repr__(self):
-        return "(slice {} {}:{})".format(repr(self.value), self.start, self.stop)
+        return f"(slice {self.value!r} {self.start}:{self.stop})"
 
 
 @final
 class Part(Value):
     def __init__(self, value, offset, width, stride=1, *, src_loc_at=0):
         if not isinstance(width, int) or width < 0:
-            raise TypeError("Part width must be a non-negative integer, not {!r}".format(width))
+            raise TypeError(f"Part width must be a non-negative integer, not {width!r}")
         if not isinstance(stride, int) or stride <= 0:
-            raise TypeError("Part stride must be a positive integer, not {!r}".format(stride))
+            raise TypeError(f"Part stride must be a positive integer, not {stride!r}")
+
+        value = Value.cast(value)
+        offset = Value.cast(offset)
+        if offset.shape().signed:
+            raise TypeError("Part offset must be unsigned")
 
         super().__init__(src_loc_at=src_loc_at)
         self.value  = value
-        self.offset = Value.cast(offset)
+        self.offset = offset
         self.width  = width
         self.stride = stride
 
@@ -901,8 +981,9 @@ class Cat(Value):
         return "(cat {})".format(" ".join(map(repr, self.parts)))
 
 
-@final
-class Repl(Value):
+# TODO(amaranth-0.5): remove
+@deprecated("instead of `Repl(value, count)`, use `value.replicate(count)`")
+def Repl(value, count):
     """Replicate a value
 
     An input value is replicated (repeated) several times
@@ -919,35 +1000,28 @@ class Repl(Value):
 
     Returns
     -------
-    Repl, out
+    Value, out
         Replicated value.
     """
-    def __init__(self, value, count, *, src_loc_at=0):
-        if not isinstance(count, int) or count < 0:
-            raise TypeError("Replication count must be a non-negative integer, not {!r}"
-                            .format(count))
+    if isinstance(value, int) and value not in [0, 1]:
+        warnings.warn("Value argument of Repl() is a bare integer {} used in bit vector "
+                        "context; consider specifying explicit width using C({}, {}) instead"
+                        .format(value, value, bits_for(value)),
+                        SyntaxWarning, stacklevel=3)
 
-        super().__init__(src_loc_at=src_loc_at)
-        if isinstance(value, int) and value not in [0, 1]:
-            warnings.warn("Value argument of Repl() is a bare integer {} used in bit vector "
-                          "context; consider specifying explicit width using C({}, {}) instead"
-                          .format(value, value, bits_for(value)),
-                          SyntaxWarning, stacklevel=2 + src_loc_at)
-        self.value = Value.cast(value)
-        self.count = count
+    return Value.cast(value).replicate(count)
 
-    def shape(self):
-        return Shape(len(self.value) * self.count)
 
-    def _rhs_signals(self):
-        return self.value._rhs_signals()
-
-    def __repr__(self):
-        return "(repl {!r} {})".format(self.value, self.count)
+class _SignalMeta(ABCMeta):
+    def __call__(cls, shape=None, src_loc_at=0, **kwargs):
+        signal = super().__call__(shape, **kwargs, src_loc_at=src_loc_at + 1)
+        if isinstance(shape, ShapeCastable):
+            return shape(signal)
+        return signal
 
 
 # @final
-class Signal(Value, DUID):
+class Signal(Value, DUID, metaclass=_SignalMeta):
     """A varying integer value.
 
     Parameters
@@ -988,12 +1062,12 @@ class Signal(Value, DUID):
     decoder : function
     """
 
-    def __init__(self, shape=None, *, name=None, reset=0, reset_less=False,
+    def __init__(self, shape=None, *, name=None, reset=None, reset_less=False,
                  attrs=None, decoder=None, src_loc_at=0):
         super().__init__(src_loc_at=src_loc_at)
 
         if name is not None and not isinstance(name, str):
-            raise TypeError("Name must be a string, not {!r}".format(name))
+            raise TypeError(f"Name must be a string, not {name!r}")
         self.name = name or tracer.get_var_name(depth=2 + src_loc_at, default="$signal")
 
         orig_shape = shape
@@ -1005,12 +1079,27 @@ class Signal(Value, DUID):
         self.signed = shape.signed
 
         orig_reset = reset
-        try:
-            reset = Const.cast(reset)
-        except TypeError:
-            raise TypeError("Reset value must be a constant-castable expression, not {!r}"
-                            .format(orig_reset))
-        if orig_reset not in (0, -1): # Avoid false positives for all-zeroes and all-ones
+        if isinstance(orig_shape, ShapeCastable):
+            try:
+                reset = Const.cast(orig_shape.const(reset))
+            except Exception:
+                raise TypeError("Reset value must be a constant initializer of {!r}"
+                                .format(orig_shape))
+            if reset.shape() != Shape.cast(orig_shape):
+                raise ValueError("Constant returned by {!r}.const() must have the shape that "
+                                 "it casts to, {!r}, and not {!r}"
+                                 .format(orig_shape, Shape.cast(orig_shape),
+                                         reset.shape()))
+        else:
+            if reset is None:
+                reset = 0
+            try:
+                reset = Const.cast(reset)
+            except TypeError:
+                raise TypeError("Reset value must be a constant-castable expression, not {!r}"
+                                .format(orig_reset))
+        # Avoid false positives for all-zeroes and all-ones
+        if orig_reset is not None and not (isinstance(orig_reset, int) and orig_reset in (0, -1)):
             if reset.shape().signed and not self.signed:
                 warnings.warn(
                     message="Reset value {!r} is signed, but the signal shape is {!r}"
@@ -1068,7 +1157,11 @@ class Signal(Value, DUID):
             new_name = other.name + str(name_suffix)
         else:
             new_name = tracer.get_var_name(depth=2 + src_loc_at, default="$like")
-        kw = dict(shape=Value.cast(other).shape(), name=new_name)
+        if isinstance(other, ValueCastable):
+            shape = other.shape()
+        else:
+            shape = Value.cast(other).shape()
+        kw = dict(shape=shape, name=new_name)
         if isinstance(other, Signal):
             kw.update(reset=other.reset, reset_less=other.reset_less,
                       attrs=other.attrs, decoder=other.decoder)
@@ -1085,7 +1178,7 @@ class Signal(Value, DUID):
         return SignalSet((self,))
 
     def __repr__(self):
-        return "(sig {})".format(self.name)
+        return f"(sig {self.name})"
 
 
 @final
@@ -1104,9 +1197,9 @@ class ClockSignal(Value):
     def __init__(self, domain="sync", *, src_loc_at=0):
         super().__init__(src_loc_at=src_loc_at)
         if not isinstance(domain, str):
-            raise TypeError("Clock domain name must be a string, not {!r}".format(domain))
+            raise TypeError(f"Clock domain name must be a string, not {domain!r}")
         if domain == "comb":
-            raise ValueError("Domain '{}' does not have a clock".format(domain))
+            raise ValueError(f"Domain '{domain}' does not have a clock")
         self.domain = domain
 
     def shape(self):
@@ -1119,7 +1212,7 @@ class ClockSignal(Value):
         raise NotImplementedError("ClockSignal must be lowered to a concrete signal") # :nocov:
 
     def __repr__(self):
-        return "(clk {})".format(self.domain)
+        return f"(clk {self.domain})"
 
 
 @final
@@ -1140,9 +1233,9 @@ class ResetSignal(Value):
     def __init__(self, domain="sync", allow_reset_less=False, *, src_loc_at=0):
         super().__init__(src_loc_at=src_loc_at)
         if not isinstance(domain, str):
-            raise TypeError("Clock domain name must be a string, not {!r}".format(domain))
+            raise TypeError(f"Clock domain name must be a string, not {domain!r}")
         if domain == "comb":
-            raise ValueError("Domain '{}' does not have a reset".format(domain))
+            raise ValueError(f"Domain '{domain}' does not have a reset")
         self.domain = domain
         self.allow_reset_less = allow_reset_less
 
@@ -1156,7 +1249,7 @@ class ResetSignal(Value):
         raise NotImplementedError("ResetSignal must be lowered to a concrete signal") # :nocov:
 
     def __repr__(self):
-        return "(rst {})".format(self.domain)
+        return f"(rst {self.domain})"
 
 
 class Array(MutableSequence):
@@ -1321,6 +1414,9 @@ class ValueCastable:
         if not hasattr(cls, "as_value"):
             raise TypeError(f"Class '{cls.__name__}' deriving from `ValueCastable` must override "
                             "the `as_value` method")
+        if not hasattr(cls, "shape"):
+            raise TypeError(f"Class '{cls.__name__}' deriving from `ValueCastable` must override "
+                            "the `shape` method")
         if not hasattr(cls.as_value, "_ValueCastable__memoized"):
             raise TypeError(f"Class '{cls.__name__}' deriving from `ValueCastable` must decorate "
                             "the `as_value` method with the `ValueCastable.lowermethod` decorator")
@@ -1447,7 +1543,7 @@ class Statement:
             if isinstance(obj, Statement):
                 return _StatementList([obj])
             else:
-                raise TypeError("Object {!r} is not an Amaranth statement".format(obj))
+                raise TypeError(f"Object {obj!r} is not an Amaranth statement")
 
 
 @final
@@ -1464,7 +1560,7 @@ class Assign(Statement):
         return self.lhs._rhs_signals() | self.rhs._rhs_signals()
 
     def __repr__(self):
-        return "(eq {!r} {!r})".format(self.lhs, self.rhs)
+        return f"(eq {self.lhs!r} {self.rhs!r})"
 
 
 class UnusedProperty(UnusedMustUse):
@@ -1484,10 +1580,10 @@ class Property(Statement, MustUse):
             raise TypeError("Property name must be a string or None, not {!r}"
                             .format(self.name))
         if self._check is None:
-            self._check = Signal(reset_less=True, name="${}$check".format(self._kind))
+            self._check = Signal(reset_less=True, name=f"${self._kind}$check")
             self._check.src_loc = self.src_loc
         if _en is None:
-            self._en = Signal(reset_less=True, name="${}$en".format(self._kind))
+            self._en = Signal(reset_less=True, name=f"${self._kind}$en")
             self._en.src_loc = self.src_loc
 
     def _lhs_signals(self):
@@ -1498,8 +1594,8 @@ class Property(Statement, MustUse):
 
     def __repr__(self):
         if self.name is not None:
-            return "({}: {} {!r})".format(self.name, self._kind, self.test)    
-        return "({} {!r})".format(self._kind, self.test)
+            return f"({self.name}: {self._kind} {self.test!r})"
+        return f"({self._kind} {self.test!r})"
 
 
 @final
@@ -1574,9 +1670,9 @@ class Switch(Statement):
         def case_repr(keys, stmts):
             stmts_repr = " ".join(map(repr, stmts))
             if keys == ():
-                return "(default {})".format(stmts_repr)
+                return f"(default {stmts_repr})"
             elif len(keys) == 1:
-                return "(case {} {})".format(keys[0], stmts_repr)
+                return f"(case {keys[0]} {stmts_repr})"
             else:
                 return "(case ({}) {})".format(" ".join(keys), stmts_repr)
         case_reprs = [case_repr(keys, stmts) for keys, stmts in self.cases.items()]
@@ -1634,7 +1730,7 @@ class _MappedKeyDict(MutableMapping, _MappedKeyCollection):
         return len(self._storage)
 
     def __repr__(self):
-        pairs = ["({!r}, {!r})".format(k, v) for k, v in self.items()]
+        pairs = [f"({k!r}, {v!r})" for k, v in self.items()]
         return "{}.{}([{}])".format(type(self).__module__, type(self).__name__,
                                     ", ".join(pairs))
 
@@ -1695,8 +1791,6 @@ class ValueKey:
                               tuple(ValueKey(e) for e in self.value._iter_as_values())))
         elif isinstance(self.value, Sample):
             self._hash = hash((ValueKey(self.value.value), self.value.clocks, self.value.domain))
-        elif isinstance(self.value, Repl):
-            self._hash = hash((ValueKey(self.value.value), self.value.count))
         elif isinstance(self.value, Initial):
             self._hash = 0
         else: # :nocov:
@@ -1713,7 +1807,7 @@ class ValueKey:
             return False
 
         if isinstance(self.value, Const):
-            return self.value.value == other.value.value
+            return self.value.value == other.value.value and self.value.width == other.value.width
         elif isinstance(self.value, (Signal, AnyValue)):
             return self.value is other.value
         elif isinstance(self.value, (ClockSignal, ResetSignal)):
@@ -1733,11 +1827,9 @@ class ValueKey:
                     self.value.width == other.value.width and
                     self.value.stride == other.value.stride)
         elif isinstance(self.value, Cat):
-            return all(ValueKey(a) == ValueKey(b)
-                        for a, b in zip(self.value.parts, other.value.parts))
-        elif isinstance(self.value, Repl):
-            return (ValueKey(self.value.value) == ValueKey(other.value.value) and
-                    self.value.count == other.value.count)
+            return (len(self.value.parts) == len(other.value.parts) and
+                    all(ValueKey(a) == ValueKey(b)
+                        for a, b in zip(self.value.parts, other.value.parts)))
         elif isinstance(self.value, ArrayProxy):
             return (ValueKey(self.value.index) == ValueKey(other.value.index) and
                     len(self.value.elems) == len(other.value.elems) and
@@ -1772,7 +1864,7 @@ class ValueKey:
             raise TypeError("Object {!r} cannot be used as a key in value collections")
 
     def __repr__(self):
-        return "<{}.ValueKey {!r}>".format(__name__, self.value)
+        return f"<{__name__}.ValueKey {self.value!r}>"
 
 
 class ValueDict(_MappedKeyDict):
@@ -1795,7 +1887,7 @@ class SignalKey:
         elif type(signal) is ResetSignal:
             self._intern = (2, signal.domain)
         else:
-            raise TypeError("Object {!r} is not an Amaranth signal".format(signal))
+            raise TypeError(f"Object {signal!r} is not an Amaranth signal")
 
     def __hash__(self):
         return hash(self._intern)
@@ -1807,11 +1899,11 @@ class SignalKey:
 
     def __lt__(self, other):
         if type(other) is not SignalKey:
-            raise TypeError("Object {!r} cannot be compared to a SignalKey".format(other))
+            raise TypeError(f"Object {other!r} cannot be compared to a SignalKey")
         return self._intern < other._intern
 
     def __repr__(self):
-        return "<{}.SignalKey {!r}>".format(__name__, self.signal)
+        return f"<{__name__}.SignalKey {self.signal!r}>"
 
 
 class SignalDict(_MappedKeyDict):
